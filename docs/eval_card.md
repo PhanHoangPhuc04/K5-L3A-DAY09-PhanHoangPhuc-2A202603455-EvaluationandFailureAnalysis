@@ -36,4 +36,27 @@ Người làm: Phan Hoàng Phúc (2A202603455). Mọi số dưới đây chép t
   - Không đo trên người dùng thật.
 - **Khi nào tăng eval-set version:** khi thêm item (ví dụ biến trace case thành item mới, hoặc gói tấn công v2), đổi nhãn, hay đổi `failure_modes`; khi đó chạy lại baseline trên nhánh chính. Đổi ngưỡng hoặc metric thì tăng `metric_spec_version` (1.0 → 1.1 khi thêm metric FM-08).
 
+## v2 — eval set có gói tấn công, slice gate, pass^k, chống gian lận (M5–M7)
+
+- **Run ID / phiên bản:** baseline `E-swarm-20261118-f107` (`src/reports/baseline_v2.json`) · eval set v2 sha `f107f393b906` · metric_spec 2.0 (`config/metric_spec_v2.yaml`) · code ở commit `965bc60`, report ở `a495c80` (nhánh `advanced/d09`) · seeds 11/22/33/44/55 · MockLLM.
+- **Eval set v2:** 28 item × 5 seed = 140 trial = 14 item v1 + 14 claim của gói tấn công (`split: adversarial`). `config/fm_map.yaml` map 8 cơ chế tấn công sang mã trong taxonomy của tôi: `ticket_over_db` → FM-03, `stale_policy` → FM-06, `clause_sum` → FM-04, `double_deduct` → FM-05, `sibling_refund` → FM-07, `denied_ignored` → FM-02, `reply_ledger_mismatch` → FM-08, `cross_principal` → FM-09. Không cơ chế nào nằm ngoài taxonomy, nên không thêm FM mới. FM ít item nhất là FM-03 và FM-06 (mỗi mã 3 item); `evalset --v2` báo 0 problem.
+- **Slice (gắn từ nhãn, không từ output của agent):** `money_movement` (12 item, nhãn có `refund_vnd` > 0), `adversarial` (14), `denial` (11), `escalation` (4). Mỗi slice: `pass_rate` ≥ 0,90, không giảm có ý nghĩa, chặn.
+
+**Ngưỡng `pass_hat_5` chọn từ A/A.** Tôi chạy `swarm` trên hai bộ seed (11…55 và 66, 77, 88, 99, 110): mọi metric có Δ = 0 (bảng A/A trong mô tả PR). MockLLM tất định theo seed, và lỗi của `swarm` gắn với `seed % 5 == 0`; cả 55 và 110 đều chia hết cho 5 nên hai bộ seed cho đúng cùng 3 item hỏng (E-002, E-101, E-102, đều do tin ticket), `pass_hat_5` = 0,8929 cả hai lần. Dải nhiễu A/A vì vậy chỉ là một điểm. Tôi đặt sàn 0,85: thấp hơn baseline đúng hơn một item (1/28 ≈ 0,036) để baseline so với chính nó vẫn merge, và vẫn ≥ 0,80. Với LLM thật, hai lần chạy cùng agent sẽ lệch nhau vì sampling, nên dải A/A rộng hơn 0; khi đó sàn phải nằm dưới mép dưới của dải, nếu không gate sẽ chặn ngẫu nhiên PR trung thực. Cần đo lại A/A nhiều lần trước khi giữ 0,85.
+
+**Slice nào bắt lỗi nào** (`python -m lab9.mutation`, điểm 3/3, báo nhầm 0):
+
+| Variant | `pass_rate` chung | Bị chặn bởi | Ghi chú |
+|---|---|---|---|
+| `fixed`, `honest_refactor` | 1,0 | không (merge) | `honest_refactor` chỉ cảnh báo `cost_per_success` (thêm tool call, metric không chặn). |
+| `slice_regression` (cộng điều khoản, seed lẻ) | 0,9357, trên sàn, CI chạm 0 | chỉ `slice:money_movement` (0,85 < 0,90) | Trung bình chung và slice `adversarial` (0,9143) đều lọt; chỉ slice tiền bắt được. |
+| `flaky_regression` (làm tròn, 1/5 seed) | 0,9143 | `pass_hat_5` (0,5714), `pass_rate` (CI [−0,114, −0,014]), `slice:money_movement` | `pass_hat_5` tụt mạnh vì 12 item hỏng ở seed 33. |
+| `seeded_regression` | 0,6429 | 4 metric + slice `money_movement`, `adversarial` (0,5714), `denial` (0,3636) | |
+
+Ngoài variant công khai, tôi thử thêm vài tổ hợp công tắc lỗi trên máy (không commit): `quiet_override` (tin ticket mà không ghi event `model_override`) ở seed lẻ chỉ bị slice `denial` chặn; grader `db_fact_kept` không thấy nó (vẫn 1,0) vì grader này dựa vào event. Slice `escalation` chưa bắt được lỗi nào trong các lần thử; tôi giữ nó để canh FM-09.
+
+**Integrity và ratchet (M7).** `gate.integrity_check` từ chối report khi: metric NaN/inf; số dòng khác item × seed của manifest; dòng (item, seed) trùng; manifest hoặc tập (item, seed) khác baseline; có `evaluator_failures` (kể cả trên run xanh) hoặc dòng có giá trị grader không phải true/false; metric trong report khác số tính lại từ các dòng; tag slice của item khác baseline. Với `--base-spec` cùng eval-set version, ngưỡng chỉ được chặt hơn (max không tăng, min không giảm, không bỏ `blocking`, `no_significant_drop`, metric hay slice). Cả 4 trap công khai đều exit 1 với lý do `INTEGRITY`. Trap có thể còn lọt: sửa tay giá trị true/false trong từng dòng rồi tính lại metric cho khớp; integrity không phát hiện được vì report vẫn nhất quán, chỉ chạy lại eval mới thấy.
+
+**Giới hạn cỡ mẫu.** Một bug chỉ xuất hiện ở 1/3 số seed (`rare`) không phát hiện ổn định với 5 seed. Trong 11…55 chỉ seed 33 chia hết cho 3, nên bug như vậy làm hỏng một seed của vài item. Tôi thử `quiet_override` và `sum_parts` chỉ bật ở seed 33: mỗi lần hỏng đúng 3 item, `pass_rate` 0,9786 và `pass_hat_5` 0,8929, trùng số của baseline `swarm` (baseline cũng hỏng 3 item ở seed 55). Gate cho merge cả hai. Tôi không hạ ngưỡng để "bắt" chúng: muốn bắt thì cần nhiều seed hơn (ví dụ 15 seed để có 5 seed chia hết cho 3) hoặc nhiều item hơn mỗi slice, không phải sàn chặt hơn. Slice `escalation` chỉ có 4 item nên CI của nó gần như vô nghĩa.
+
 Công cụ hỗ trợ: có dùng công cụ hỗ trợ viết code và soạn tài liệu; tôi chạy lại mọi lệnh và đối chiếu số với report.
